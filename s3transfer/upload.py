@@ -56,7 +56,7 @@ class UploadTaskSubmitter(TaskSubmitter):
         done_callbacks = get_callbacks(transfer_future, 'done')
 
         # Create a file like object to use for the upload
-        fileobj = self._osutil.open_file_chunk_reader(
+        fileobj = functools.partial(self._osutil.open_file_chunk_reader,
             call_args.fileobj, 0, transfer_future.meta.size,
             progress_callbacks)
 
@@ -72,8 +72,7 @@ class UploadTaskSubmitter(TaskSubmitter):
                     'extra_args': call_args.extra_args,
                 },
                 done_callbacks=(
-                    [fileobj.close] + unregistering_callbacks +
-                    done_callbacks),
+                    unregistering_callbacks + done_callbacks),
                 is_final=True
             )
         )
@@ -202,7 +201,8 @@ class PutObjectTask(Task):
         :param extra_args: A dictionary of any extra arguments that may be
             used in the upload.
         """
-        client.put_object(Bucket=bucket, Key=key, Body=body, **extra_args)
+        with body() as b:
+            client.put_object(Bucket=bucket, Key=key, Body=b, **extra_args)
 
 
 class CreateMultipartUploadTask(Task):
