@@ -20,7 +20,8 @@ def benchmark_download(args):
     tempdir = tempfile.mkdtemp()
     temp_file = os.path.join(tempdir, TEMP_FILE)
     if args.target_download_tmp_file:
-        temp_file = args.target_download_tmp_file
+        temp_file = os.path.abspath(
+            os.path.expanduser(args.target_download_tmp_file))
     session = get_session()
     client = session.create_client('s3')
     s3_key = args.existing_s3_key
