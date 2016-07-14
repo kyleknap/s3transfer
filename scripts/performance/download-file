@@ -18,6 +18,8 @@ class Downloader(object):
         session = get_session()
         client = session.create_client('s3')
         file_type = args.file_type
+        if args.debug:
+            session.set_debug_logger('')
         with TransferManager(client) as manager:
             getattr(self, 'download_' + file_type)(
                 manager, args.file_name, args.s3_bucket, args.s3_key)
@@ -45,6 +47,7 @@ def main():
         required=True)
     parser.add_argument('--s3-bucket', required=True)
     parser.add_argument('--s3-key', required=True)
+    parser.add_argument('--debug', action='store_true')
     args = parser.parse_args()
     Downloader().download(args)
 

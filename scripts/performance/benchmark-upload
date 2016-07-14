@@ -16,30 +16,34 @@ TEMP_KEY = 'temp'
 
 
 def benchmark_upload(args):
-    tempdir = tempfile.mkdtemp()
-    temp_file = os.path.join(tempdir, TEMP_FILE)
+    source_file = args.source_file
     session = get_session()
     client = session.create_client('s3')
+    tempdir = None
     try:
-        create_file(temp_file, args.file_size)
+        if not source_file:
+            tempdir = tempfile.mkdtemp()
+            source_file = os.path.join(tempdir, TEMP_FILE)
+            create_file(source_file, args.file_size)
         upload_file_script = (
             './upload-file --file-name %s --file-type %s --s3-bucket %s '
             '--s3-key %s' % (
-                temp_file, args.file_type, args.s3_bucket, TEMP_KEY)
+                source_file, args.file_type, args.s3_bucket, TEMP_KEY)
         )
         benchmark_args = ['./benchmark', upload_file_script]
         if args.output_file:
             benchmark_args.extend(['--output-file', args.output_file])
         subprocess.check_call(benchmark_args)
     finally:
-        shutil.rmtree(tempdir)
+        if tempdir:
+            shutil.rmtree(tempdir)
     client.delete_object(Bucket=args.s3_bucket, Key=TEMP_KEY)
 
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument(
-        '--file-size', type=human_readable_to_bytes, required=True)
+    parser.add_argument('--source-file')
+    parser.add_argument('--file-size', type=human_readable_to_bytes)
     parser.add_argument(
         '--file-type', choices=['filename', 'seekable', 'nonseekable'],
         required=True)
