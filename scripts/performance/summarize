@@ -105,7 +105,7 @@ class Summarizer(object):
 
 def main():
     parser = argparse.ArgumentParser(usage=__doc__)
-    parser.add_argument('-f', '--benchmark-file')
+    parser.add_argument('-f', '--benchmark-file', required=True)
     args = parser.parse_args()
     summarizer = Summarizer()
     summarizer.process(args)

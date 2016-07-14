@@ -1,0 +1,65 @@
+#!/usr/bin/env python
+import argparse
+import os
+import tempfile
+import shutil
+import subprocess
+
+from botocore.session import get_session
+from s3transfer.manager import TransferManager
+
+from utils import human_readable_to_bytes
+from utils import create_file
+
+
+TEMP_FILE = 'temp'
+TEMP_KEY = 'temp'
+
+
+def benchmark_download(args):
+    tempdir = tempfile.mkdtemp()
+    temp_file = os.path.join(tempdir, TEMP_FILE)
+    session = get_session()
+    client = session.create_client('s3')
+    s3_key = args.existing_s3_key
+    try:
+        if not args.existing_s3_key:
+            s3_key = TEMP_KEY
+            create_file(temp_file, args.file_size)
+            upload_file(client, temp_file, args.s3_bucket)
+        upload_file_script = (
+            './download-file --file-name %s --file-type %s --s3-bucket %s '
+            '--s3-key %s' % (
+                temp_file, args.file_type, args.s3_bucket, s3_key)
+        )
+        benchmark_args = ['./benchmark', upload_file_script]
+        if args.output_file:
+            benchmark_args.extend(['--output-file', args.output_file])
+        subprocess.check_call(benchmark_args)
+    finally:
+        shutil.rmtree(tempdir)
+        if not args.existing_s3_key:
+            client.delete_object(Bucket=args.s3_bucket, Key=s3_key)
+
+
+def upload_file(client, filename, bucket):
+    with TransferManager(client) as manager:
+        manager.upload(filename, bucket, TEMP_KEY)
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        '--file-size', type=human_readable_to_bytes)
+    parser.add_argument(
+        '--file-type', choices=['filename', 'seekable', 'nonseekable'],
+        required=True)
+    parser.add_argument('--s3-bucket', required=True)
+    parser.add_argument('--existing-s3-key')
+    parser.add_argument('--output-file')
+    args = parser.parse_args()
+    benchmark_download(args)
+
+
+if __name__ == '__main__':
+    main()

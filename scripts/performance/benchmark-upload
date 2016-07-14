@@ -1,0 +1,53 @@
+#!/usr/bin/env python
+import argparse
+import os
+import tempfile
+import shutil
+import subprocess
+
+from botocore.session import get_session
+
+from utils import human_readable_to_bytes
+from utils import create_file
+
+
+TEMP_FILE = 'temp'
+TEMP_KEY = 'temp'
+
+
+def benchmark_upload(args):
+    tempdir = tempfile.mkdtemp()
+    temp_file = os.path.join(tempdir, TEMP_FILE)
+    session = get_session()
+    client = session.create_client('s3')
+    try:
+        create_file(temp_file, args.file_size)
+        upload_file_script = (
+            './upload-file --file-name %s --file-type %s --s3-bucket %s '
+            '--s3-key %s' % (
+                temp_file, args.file_type, args.s3_bucket, TEMP_KEY)
+        )
+        benchmark_args = ['./benchmark', upload_file_script]
+        if args.output_file:
+            benchmark_args.extend(['--output-file', args.output_file])
+        subprocess.check_call(benchmark_args)
+    finally:
+        shutil.rmtree(tempdir)
+    client.delete_object(Bucket=args.s3_bucket, Key=TEMP_KEY)
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        '--file-size', type=human_readable_to_bytes, required=True)
+    parser.add_argument(
+        '--file-type', choices=['filename', 'seekable', 'nonseekable'],
+        required=True)
+    parser.add_argument('--s3-bucket', required=True)
+    parser.add_argument('--output-file')
+    args = parser.parse_args()
+    benchmark_upload(args)
+
+
+if __name__ == '__main__':
+    main()

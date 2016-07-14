@@ -41,7 +41,9 @@ def benchmark(args):
 
 
 def run_script(args):
-    return subprocess.Popen(args.script)
+    script_args = args.script.split(' ')
+    return subprocess.Popen(script_args)
+
 
 def run_benchmark(pid, output_file, data_interval):
     p = psutil.Process(pid)
@@ -82,9 +84,9 @@ def run_benchmark(pid, output_file, data_interval):
 def main():
     parser = argparse.ArgumentParser(usage=__doc__)
     parser.add_argument(
-        'script', nargs='+', help='The script to run for benchmarking')
+        'script', help='The script to run for benchmarking')
     parser.add_argument(
-        '--data-interval', default=1, type=float)
+        '--data-interval', default=0.1, type=float)
     parser.add_argument(
         '--output-file', default='performance.csv')
     args = parser.parse_args()
