@@ -19,6 +19,8 @@ TEMP_KEY = 'temp'
 def benchmark_download(args):
     tempdir = tempfile.mkdtemp()
     temp_file = os.path.join(tempdir, TEMP_FILE)
+    if args.target_download_tmp_file:
+        temp_file = args.target_download_tmp_file
     session = get_session()
     client = session.create_client('s3')
     s3_key = args.existing_s3_key
@@ -56,6 +58,7 @@ def main():
         required=True)
     parser.add_argument('--s3-bucket', required=True)
     parser.add_argument('--existing-s3-key')
+    parser.add_argument('--target-download-tmp-file')
     parser.add_argument('--output-file')
     args = parser.parse_args()
     benchmark_download(args)
