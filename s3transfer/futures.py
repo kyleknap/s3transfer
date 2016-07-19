@@ -122,7 +122,7 @@ class TransferCoordinator(object):
         self._status = 'queued'
         self._result = None
         self._exception = None
-        self._associated_futures = []
+        self._associated_futures = set()
         self._failure_cleanups = []
         self._done_callbacks = []
         self._done_event = threading.Event()
@@ -251,6 +251,7 @@ class TransferCoordinator(object):
         # Add this created future to the list of associated future just
         # in case it is needed during cleanups.
         self.add_associated_future(future)
+        future.add_done_callback(self.remove_associated_future)
         return future
 
     def done(self):
@@ -264,7 +265,12 @@ class TransferCoordinator(object):
     def add_associated_future(self, future):
         """Adds a future to be associated with the TransferFuture"""
         with self._associated_futures_lock:
-            self._associated_futures.append(future)
+            self._associated_futures.add(future)
+
+    def remove_associated_future(self, future):
+        """Removes a future's association to the TransferFuture"""
+        with self._associated_futures_lock:
+            self._associated_futures.remove(future)
 
     def add_done_callback(self, function, *args, **kwargs):
         """Add a done callback to be invoked when transfer is done"""
@@ -297,7 +303,7 @@ class TransferCoordinator(object):
         # Once the process is done, we want to empty the list so we do
         # not hold onto too many completed futures.
         with self._associated_futures_lock:
-            self._associated_futures = []
+            self._associated_futures = set()
 
     def _run_done_callbacks(self):
         # Run the callbacks and remove the callbacks from the internal
