@@ -580,6 +580,59 @@ class TestTask(unittest.TestCase):
         with self.assertRaises(TaskFailureException):
             self.transfer_coordinator.result()
 
+    def test_stress_test_pending_main_kwargs(self):
+        # The purpose of this test is to have some stress tests in place if
+        # this bug is run into ever again: https://bugs.python.org/issue20319
+        # involving concurrent.futures.wait()
+        #
+        # There is no guarantee that this will get caught on every test run
+        # if there is an issue, but it is better than nothing where all we
+        # had before in terms of stress test was in the integration tests.
+
+        num_futures_to_wait_on = 10
+        ref_result = 'foo'
+        dependent_futures = []
+        futures_to_wait_on = []
+        ref_waited_on_results = [
+            ref_result for _ in range(num_futures_to_wait_on)]
+
+        with futures.ThreadPoolExecutor(20) as executor:
+            # Create some initial futures that will be dependended on by
+            # many more futures
+            for _ in range(num_futures_to_wait_on):
+                futures_to_wait_on.append(
+                    executor.submit(
+                        SuccessTask(
+                            self.transfer_coordinator,
+                            main_kwargs={'return_value': ref_result}
+                        )
+                    )
+                )
+            for _ in range(100):
+                # Since pending_main_kwargs are provided, these tasks will
+                # have to wait for the first task to finish.
+                #
+                # The bug ran into here: https://bugs.python.org/issue20319
+                # happens only really when wait() is called in multiple
+                # threads as there is a concurrency issue when adding waiters
+                dependent_futures.append(
+                    executor.submit(
+                        ReturnKwargsTask(
+                            self.transfer_coordinator,
+                            pending_main_kwargs={
+                                'waited_on_results': futures_to_wait_on
+                            }
+                        )
+                    )
+                )
+        # Make sure at least that all of the task completed with the expected
+        # result.
+        for future in dependent_futures:
+            self.assertEqual(
+                future.result(),
+                {'waited_on_results': ref_waited_on_results}
+            )
+
 
 class BaseMultipartTaskTest(BaseTaskTest):
     def setUp(self):
