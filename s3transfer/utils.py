@@ -392,6 +392,10 @@ class ReadFileChunk(object):
 
     def close(self):
         self._fileobj.close()
+        if self._callbacks is not None and self._callbacks_enabled:
+            for callback in self._callbacks:
+                if hasattr(callback, 'finalize'):
+                    callback.finalize()
 
     def tell(self):
         return self._amount_read

@@ -24,6 +24,26 @@ from s3transfer.utils import get_callbacks
 from s3transfer.utils import DeferredOpenFile
 
 
+class AggregatedProgressCallback(object):
+    def __init__(self, callback, threshold=1024 * 256):
+        self._callback = callback
+        self._threshold = threshold
+        self._bytes_seen = 0
+
+    def __call__(self, bytes_transferred):
+        self._bytes_seen += bytes_transferred
+        if self._bytes_seen >= self._threshold:
+            self._trigger_callback()
+
+    def finalize(self):
+        if self._bytes_seen > 0:
+            self._trigger_callback()
+
+    def _trigger_callback(self):
+        self._callback(bytes_transferred=self._bytes_seen)
+        self._bytes_seen = 0
+
+
 class InterruptReader(object):
     """Wrapper that can interrupt reading using an error
 
@@ -170,6 +190,10 @@ class UploadInputManager(object):
     def _wrap_with_interrupt_reader(self, fileobj):
         return InterruptReader(fileobj, self._transfer_coordinator)
 
+    def _get_progress_callbacks(self, transfer_future):
+        callbacks = get_callbacks(transfer_future, 'progress')
+        return [AggregatedProgressCallback(callback) for callback in callbacks]
+
 
 class UploadFilenameInputManager(UploadInputManager):
     """Upload utility for filenames"""
@@ -198,7 +222,7 @@ class UploadFilenameInputManager(UploadInputManager):
         # to completely read all of the data.
         fileobj = self._wrap_with_interrupt_reader(fileobj)
 
-        callbacks = get_callbacks(transfer_future, 'progress')
+        callbacks = self._get_progress_callbacks(transfer_future)
         size = transfer_future.meta.size
         # Return the file-like object wrapped into a ReadFileChunk to get
         # progress.
@@ -210,8 +234,8 @@ class UploadFilenameInputManager(UploadInputManager):
         part_size = config.multipart_chunksize
         full_file_size = transfer_future.meta.size
         num_parts = self._get_num_parts(transfer_future, part_size)
-        callbacks = get_callbacks(transfer_future, 'progress')
         for part_number in range(1, num_parts + 1):
+            callbacks = self._get_progress_callbacks(transfer_future)
             start_byte = part_size * (part_number - 1)
             # Get a file-like object for that part and the size of the full
             # file size for the associated file-like object for that part.
@@ -334,7 +358,7 @@ class UploadNonSeekableInputManager(UploadInputManager):
             return True
 
     def get_put_object_body(self, transfer_future):
-        callbacks = get_callbacks(transfer_future, 'progress')
+        callbacks = self._get_progress_callbacks(transfer_future)
         fileobj = transfer_future.meta.call_args.fileobj
 
         body = self._wrap_data(
@@ -348,11 +372,11 @@ class UploadNonSeekableInputManager(UploadInputManager):
     def yield_upload_part_bodies(self, transfer_future, config):
         part_size = config.multipart_chunksize
         file_object = transfer_future.meta.call_args.fileobj
-        callbacks = get_callbacks(transfer_future, 'progress')
         part_number = 0
 
         # Continue reading parts from the file-like object until it is empty.
         while True:
+            callbacks = self._get_progress_callbacks(transfer_future)
             part_number += 1
             part_content = self._read(file_object, part_size)
             if not part_content:
