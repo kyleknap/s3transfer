@@ -62,6 +62,7 @@ class DownloadOutputManager(object):
         self._osutil = osutil
         self._transfer_coordinator = transfer_coordinator
         self._io_executor = io_executor
+        self._event = threading.Event()
 
     @classmethod
     def is_compatible(cls, download_target, osutil):
@@ -130,6 +131,9 @@ class DownloadOutputManager(object):
         raise NotImplementedError(
             'must implement get_final_io_task()')
 
+    def signal_done_writing(self):
+        self._event.set()
+
 
 class DownloadFilenameOutputManager(DownloadOutputManager):
     def __init__(self, osutil, transfer_coordinator, io_executor):
@@ -159,7 +163,8 @@ class DownloadFilenameOutputManager(DownloadOutputManager):
             main_kwargs={
                 'fileobj': self._temp_fileobj,
                 'final_filename': self._final_filename,
-                'osutil': self._osutil
+                'osutil': self._osutil,
+                'event': self._event
             },
             is_final=True
         )
@@ -194,8 +199,9 @@ class DownloadSpecialFilenameOutputManager(DownloadFilenameOutputManager):
         # This task will serve the purpose of signaling when all of the io
         # writes have finished so done callbacks can be called.
         return CompleteDownloadNOOPTask(
-            transfer_coordinator=self._transfer_coordinator)
-
+            transfer_coordinator=self._transfer_coordinator,
+            main_kwargs={'event': self._event}
+        )
 
 class DownloadSeekableOutputManager(DownloadOutputManager):
     @classmethod
@@ -210,7 +216,9 @@ class DownloadSeekableOutputManager(DownloadOutputManager):
         # This task will serve the purpose of signaling when all of the io
         # writes have finished so done callbacks can be called.
         return CompleteDownloadNOOPTask(
-            transfer_coordinator=self._transfer_coordinator)
+            transfer_coordinator=self._transfer_coordinator,
+            main_kwargs={'event': self._event}
+        )
 
 
 class DownloadNonSeekableOutputManager(DownloadOutputManager):
@@ -235,7 +243,9 @@ class DownloadNonSeekableOutputManager(DownloadOutputManager):
 
     def get_final_io_task(self):
         return CompleteDownloadNOOPTask(
-            transfer_coordinator=self._transfer_coordinator)
+            transfer_coordinator=self._transfer_coordinator,
+            main_kwargs={'event': self._event}
+        )
 
     def queue_file_io_task(self, fileobj, data, offset):
         with self._io_submit_lock:
@@ -357,7 +367,7 @@ class DownloadSubmissionTask(SubmissionTask):
         # is complete.
         finalize_download_invoker = CountCallbackInvoker(
             self._get_final_io_task_submission_callback(
-                download_output_manager, io_executor, request_executor
+                download_output_manager, io_executor
             )
         )
         finalize_download_invoker.increment()
@@ -383,6 +393,8 @@ class DownloadSubmissionTask(SubmissionTask):
         )
 
         finalize_download_invoker.finalize()
+        final_task = download_output_manager.get_final_io_task()
+        self._transfer_coordinator.submit(request_executor, final_task)
 
     def _submit_ranged_download_request(self, client, config, osutil,
                                         request_executor, io_executor,
@@ -410,7 +422,7 @@ class DownloadSubmissionTask(SubmissionTask):
         # are complete.
         finalize_download_invoker = CountCallbackInvoker(
             self._get_final_io_task_submission_callback(
-                download_output_manager, io_executor, request_executor
+                download_output_manager, io_executor
             )
         )
         for i in range(num_parts):
@@ -445,16 +457,14 @@ class DownloadSubmissionTask(SubmissionTask):
                 tag=get_object_tag
             )
         finalize_download_invoker.finalize()
+        final_task = download_output_manager.get_final_io_task()
+        self._transfer_coordinator.submit(request_executor, final_task)
 
     def _get_final_io_task_submission_callback(self, download_manager,
-                                               io_executor, request_executor):
-        final_task = download_manager.get_final_io_task()
-        submit_callback = FunctionContainer(
-            self._transfer_coordinator.submit, request_executor, final_task)
+                                               io_executor):
         noop_task = NOOPTask(
             transfer_coordinator=self._transfer_coordinator,
-            main_kwargs={},
-            done_callbacks=[submit_callback]
+            done_callbacks=[download_manager.signal_done_writing]
         )
         return FunctionContainer(
             self._transfer_coordinator.submit, io_executor, noop_task)
@@ -567,7 +577,10 @@ class IORenameFileTask(Task):
         upon completion of writing the contents.
     :param osutil: OS utility
     """
-    def _main(self, fileobj, final_filename, osutil):
+    def _main(self, fileobj, final_filename, osutil, event):
+        logger.debug('About to wait')
+        event.wait()
+        logger.debug('done waiting')
         fileobj.close()
         osutil.rename_file(fileobj.name, final_filename)
 
@@ -589,8 +602,10 @@ class CompleteDownloadNOOPTask(Task):
             is_final=is_final
         )
 
-    def _main(self):
-        pass
+    def _main(self, event):
+        logger.debug('About to wait')
+        event.wait()
+        logger.debug('done waiting')
 
 
 class DeferQueue(object):
