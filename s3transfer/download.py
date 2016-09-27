@@ -104,8 +104,7 @@ class DownloadOutputManager(object):
         This method may defer submission to the IO executor if necessary.
 
         """
-        self._transfer_coordinator.submit(
-            self._io_executor,
+        self._io_executor.submit(
             IOWriteTask(
                 self._transfer_coordinator,
                 main_kwargs={
@@ -471,8 +470,7 @@ class DownloadSubmissionTask(SubmissionTask):
     def _get_final_io_task_submission_callback(self, download_manager,
                                                io_executor):
         final_task = download_manager.get_final_io_task()
-        return FunctionContainer(
-            self._transfer_coordinator.submit, io_executor, final_task)
+        return FunctionContainer(io_executor.submit, final_task)
 
     def _calculate_range_param(self, part_size, part_index, num_parts):
         # Used to calculate the Range parameter
