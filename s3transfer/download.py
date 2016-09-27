@@ -255,6 +255,24 @@ class DownloadNonSeekableOutputManager(DownloadOutputManager):
                     )
                 )
 
+class ImmediateFuture(object):
+    def __init__(self, return_value):
+        self._return_value = return_value
+
+    def result(self):
+        return self._return_value
+
+    def add_done_callback(self, fn):
+        fn()
+
+    def done(self):
+        return True
+
+class ImmediatelyExecuteExecutor(object):
+    def submit(self, task, tag=None, block=True):
+        return_val = task()
+        return ImmediateFuture(return_val)
+
 
 class DownloadSubmissionTask(SubmissionTask):
     """Task for submitting tasks to execute a download"""
@@ -321,6 +339,10 @@ class DownloadSubmissionTask(SubmissionTask):
             )
             transfer_future.meta.provide_transfer_size(
                 response['ContentLength'])
+
+        io_executor = io_executor
+        if transfer_future.meta.size < config.multipart_threshold:
+            io_executor = ImmediatelyExecuteExecutor()
 
         download_output_manager = self._get_download_output_manager_cls(
             transfer_future, osutil)(osutil, self._transfer_coordinator,
