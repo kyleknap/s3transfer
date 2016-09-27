@@ -517,8 +517,10 @@ class GetObjectTask(Task):
                     # or error somewhere else, stop trying to submit more
                     # data to be written and break out of the download.
                     if not self._transfer_coordinator.done():
-                        download_output_manager.queue_file_io_task(
-                            fileobj, chunk, current_index)
+                        fileobj.seek(current_index)
+                        fileobj.write(chunk)
+                        #download_output_manager.queue_file_io_task(
+                        #    fileobj, chunk, current_index)
                         current_index += len(chunk)
                     else:
                         return
