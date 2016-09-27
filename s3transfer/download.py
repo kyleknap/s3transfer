@@ -371,7 +371,7 @@ class DownloadSubmissionTask(SubmissionTask):
             transfer_future)
 
         # Get the needed callbacks for the task
-        progress_callbacks = []#get_callbacks(transfer_future, 'progress')
+        progress_callbacks = get_callbacks(transfer_future, 'progress')
 
         # Get any associated tags for the get object task.
         get_object_tag = download_output_manager.get_download_task_tag()
