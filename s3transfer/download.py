@@ -346,8 +346,7 @@ class DownloadSubmissionTask(SubmissionTask):
         io_executor = ImmediatelyExecuteExecutor()
 
         download_output_manager = DownloadSpecialFilenameOutputManager(
-            transfer_future, osutil)(osutil, self._transfer_coordinator,
-                                     io_executor)
+            osutil, self._transfer_coordinator, io_executor)
 
         # If it is greater than threshold do a ranged download, otherwise
         # do a regular GetObject download.
