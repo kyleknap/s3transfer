@@ -5,7 +5,7 @@ import Queue
 
 import boto3
 from s3transfer.manager import TransferManager
-
+from s3transfer.subscribers import BaseSubscriber
 
 BUCKET = 'kyleknap-dump'
 PREFIX = 'many-files-test/'
@@ -37,6 +37,16 @@ class Worker(threading.Thread):
                         f.write(chunk)
             except Queue.Empty:
                 pass
+
+class ProvideSizeSubscriber(BaseSubscriber):
+    """
+    A subscriber which provides the transfer size before it's queued.
+    """
+    def __init__(self, size):
+        self.size = size
+
+    def on_queued(self, future, **kwargs):
+        future.meta.provide_transfer_size(self.size)
 
 
 def baseline():
@@ -72,7 +82,9 @@ def s3transfer_baseline():
             for item in response['Contents']:
                 key = item['Key']
                 filename = os.path.join(LOCAL_DIRECTORY, key[len(PREFIX):])
-                manager.download(BUCKET, key, filename)
+                manager.download(
+                    BUCKET, key, filename,
+                    subscribers=[ProvideSizeSubscriber(item['Size'])])
 
 
 def main():
