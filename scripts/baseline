@@ -4,6 +4,7 @@ import threading
 import Queue
 
 import boto3
+from s3transfer.manager import TransferManager
 
 
 BUCKET = 'kyleknap-dump'
@@ -38,7 +39,7 @@ class Worker(threading.Thread):
                 pass
 
 
-def main():
+def baseline():
     threads = []
     queue = Queue.Queue()
     c = boto3.client('s3')
@@ -61,6 +62,23 @@ def main():
 
     for thread in threads:
         thread.join()
+
+def s3transfer_baseline():
+    c = boto3.client('s3')
+
+    paginator = c.get_paginator('list_objects')
+    with TransferManager(c) as manager:
+        for response in paginator.paginate(Bucket=BUCKET, Prefix=PREFIX):
+            for item in response['Contents']:
+                key = item['Key']
+                filename = os.path.join(LOCAL_DIRECTORY, key[len(PREFIX):])
+                manager.download(BUCKET, key, filename)
+
+
+def main():
+    #baseline()
+    s3transfer_baseline()
+
 
 
 if __name__ == '__main__':
