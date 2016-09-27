@@ -345,7 +345,7 @@ class DownloadSubmissionTask(SubmissionTask):
         #if transfer_future.meta.size < config.multipart_threshold:
         io_executor = ImmediatelyExecuteExecutor()
 
-        download_output_manager = self._get_download_output_manager_cls(
+        download_output_manager = DownloadSpecialFilenameOutputManager(
             transfer_future, osutil)(osutil, self._transfer_coordinator,
                                      io_executor)
 
