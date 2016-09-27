@@ -357,7 +357,7 @@ class DownloadSubmissionTask(SubmissionTask):
         # is complete.
         finalize_download_invoker = CountCallbackInvoker(
             self._get_final_io_task_submission_callback(
-                download_output_manager, io_executor
+                download_output_manager, io_executor, request_executor
             )
         )
         finalize_download_invoker.increment()
@@ -410,7 +410,7 @@ class DownloadSubmissionTask(SubmissionTask):
         # are complete.
         finalize_download_invoker = CountCallbackInvoker(
             self._get_final_io_task_submission_callback(
-                download_output_manager, io_executor
+                download_output_manager, io_executor, request_executor
             )
         )
         for i in range(num_parts):
@@ -447,10 +447,17 @@ class DownloadSubmissionTask(SubmissionTask):
         finalize_download_invoker.finalize()
 
     def _get_final_io_task_submission_callback(self, download_manager,
-                                               io_executor):
+                                               io_executor, request_executor):
         final_task = download_manager.get_final_io_task()
+        submit_callback = FunctionContainer(
+            self._transfer_coordinator.submit, request_executor, final_task)
+        noop_task = NOOPTask(
+            transfer_coordinator=self._transfer_coordinator,
+            main_kwargs={},
+            done_callbacks=[submit_callback]
+        )
         return FunctionContainer(
-            self._transfer_coordinator.submit, io_executor, final_task)
+            self._transfer_coordinator.submit, io_executor, noop_task)
 
     def _calculate_range_param(self, part_size, part_index, num_parts):
         # Used to calculate the Range parameter
@@ -517,6 +524,11 @@ class GetObjectTask(Task):
                     callbacks, start_index - current_index)
                 continue
         raise RetriesExceededError(last_exception)
+
+
+class NOOPTask(Task):
+    def _main(self):
+        pass
 
 
 class IOWriteTask(Task):
