@@ -376,12 +376,10 @@ class DownloadSubmissionTask(SubmissionTask):
 
         # Callback invoker to submit the final io task once the download
         # is complete.
-        finalize_download_invoker = CountCallbackInvoker(
-            self._get_final_io_task_submission_callback(
-                download_output_manager, io_executor
-            )
+        done_callback = self._get_final_io_task_submission_callback(
+            download_output_manager, io_executor
         )
-        finalize_download_invoker.increment()
+
         # Submit the task to download the object.
         self._transfer_coordinator.submit(
             request_executor,
@@ -398,12 +396,10 @@ class DownloadSubmissionTask(SubmissionTask):
                     'download_output_manager': download_output_manager,
                     'io_chunksize': config.io_chunksize,
                 },
-                done_callbacks=[finalize_download_invoker.decrement]
+                done_callbacks=[done_callback]
             ),
             tag=get_object_tag
         )
-
-        finalize_download_invoker.finalize()
 
     def _submit_ranged_download_request(self, client, config, osutil,
                                         request_executor, io_executor,
