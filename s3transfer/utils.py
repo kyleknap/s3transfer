@@ -435,9 +435,13 @@ class ReadFileChunk(object):
 
     def enable_callback(self):
         self._callbacks_enabled = True
+        if hasattr(self._fileobj, 'enable'):
+            self._fileobj.enable()
 
     def disable_callback(self):
         self._callbacks_enabled = False
+        if hasattr(self._fileobj, 'disable'):
+            self._fileobj.disable()
 
     def seek(self, where):
         self._fileobj.seek(self._start_byte + where)
