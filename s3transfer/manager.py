@@ -36,6 +36,8 @@ from s3transfer.upload import UploadSubmissionTask
 from s3transfer.copies import CopySubmissionTask
 from s3transfer.delete import DeleteSubmissionTask
 from s3transfer.bandwidth import TokenBucket
+from s3transfer.bandwidth import LeakyBucket
+from s3transfer.bandwidth import TokenStatTracker
 from s3transfer.bandwidth import BandwidthLimiter
 
 KB = 1024
@@ -259,8 +261,10 @@ class TransferManager(object):
         # is configured.
         self._bandwidth_limiter = None
         if self._config.max_bandwidth is not None:
-            self._bandwidth_limiter = BandwidthLimiter(
-                TokenBucket(self._config.max_bandwidth))
+            token_bucket = LeakyBucket(self._config.max_bandwidth)
+            self.token_stats = TokenStatTracker()
+            token_bucket.stats = self.token_stats
+            self._bandwidth_limiter = BandwidthLimiter(token_bucket)
 
         self._register_handlers()
 
