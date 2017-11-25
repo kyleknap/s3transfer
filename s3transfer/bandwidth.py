@@ -167,7 +167,7 @@ class ConsumptionRateTracker(object):
             self._time_utils = TimeUtils()
         self._last_consume_time = None
         self._current_rates = []
-        self._max_length = 5
+        self._max_length = 20
 
     @property
     def current_rate(self):
@@ -185,8 +185,7 @@ class ConsumptionRateTracker(object):
 
     def record_consumption_rate(self, amt, time_at_consumption):
         rate = self._get_rate_for_individual_point(amt, time_at_consumption)
-        if self._last_consume_time is None:
-            self._last_consume_time = time_at_consumption
+        self._last_consume_time = time_at_consumption
         self._update_current_rates(rate)
 
     def _get_rate_for_individual_point(self, amt, time_at_consumption):
@@ -202,7 +201,7 @@ class ConsumptionRateTracker(object):
 
 class LeakyBucket(object):
     def __init__(self, rate, time_utils=None, stats=None):
-        self._max_rate = rate
+        self._max_rate = float(rate)
         self._time_utils = time_utils
         if time_utils is None:
             self._time_utils = TimeUtils()
@@ -222,31 +221,14 @@ class LeakyBucket(object):
             #proposed_rate = time_now - self._last_consume_time
             #max_allowed_amt = self._rate * elapsed_time
 
-            if self._retry_queue:
-                if request_token not in self._retry_queue:
-                    allocated_time = amt/self._max_rate
-                    self._total_wait += allocated_time
-                    self._add_to_retry_queue(
-                        request_token, allocated_time, self._total_wait,
-                        time_now)
-                    self._raise_retry(amt, self._total_wait, time_now)
+            if request_token in self._retry_queue or \
+                    self._at_near_max_bandwidth_capacity():
+                return self._consume_at_near_max_bandwidth(
+                    amt, request_token, time_now)
 
-                elif request_token is not list(self._retry_queue)[0]:
-                    self._retry_for_premature_consume_request(
-                        amt, request_token, time_now)
-
-                else:
-                    if projected_rate > self._max_rate:
-                        self._retry_for_premature_consume_request(
-                            amt, request_token, time_now)
-                    else:
-                        scheduled_retry = self._retry_queue.pop(
-                            request_token)
-                        self._total_wait -= scheduled_retry['slot_time']
-                        return self._release_tokens(amt, time_now)
-
-            elif projected_rate > self._max_rate:
-                print('here')
+            elif self._projected_to_exceed_max_bandwidth(amt, time_now):
+                projected_rate = self._rate_tracker.get_projected_rate(
+                    amt, time_now)
                 retry_time = amt/(projected_rate - self._max_rate)
                 self._total_wait += retry_time
                 self._add_to_retry_queue(
@@ -255,6 +237,39 @@ class LeakyBucket(object):
 
             else:
                 return self._release_tokens(amt, time_now)
+
+    def _projected_to_exceed_max_bandwidth(self, amt, time_now):
+        projected_rate = self._rate_tracker.get_projected_rate(amt, time_now)
+        return projected_rate > self._max_rate
+
+    def _at_near_max_bandwidth_capacity(self):
+        return (self._rate_tracker.current_rate / self._max_rate) > 0.8
+
+    def _consume_at_near_max_bandwidth(self, amt, request_token, time_now):
+        if request_token not in self._retry_queue:
+            allocated_time = amt/float(self._max_rate)
+            self._total_wait += allocated_time
+            self._add_to_retry_queue(
+                request_token, allocated_time, self._total_wait,
+                time_now)
+            self._raise_retry(amt, self._total_wait, time_now)
+
+        #elif request_token is not list(self._retry_queue)[0]:
+        #    self._retry_for_premature_consume_request(
+        #        amt, request_token, time_now)
+
+        else:
+            #print('clearing')
+            #if self._projected_to_exceed_max_bandwidth(amt, time_now):
+            #    self._retry_for_premature_consume_request(
+            #        amt, request_token, time_now)
+            #else:
+            print('actually clearing')
+            scheduled_retry = self._retry_queue.pop(
+                request_token)
+            self._total_wait -= scheduled_retry['slot_time']
+            return self._release_tokens(amt, time_now)
+
 
     def _add_to_retry_queue(self, request_token, allocated_time, wait_duration,
                             time_now):
@@ -267,6 +282,9 @@ class LeakyBucket(object):
     def _retry_for_premature_consume_request(self, amt, request_token,
                                              time_now):
         scheduled_retry = self._retry_queue[request_token]
+        #print(scheduled_retry)
+        #print(amt)
+        #print(self._max_rate)
         time_to_wait = max(
             scheduled_retry['scheduled_time'] - time_now, 0)
         self._raise_retry(amt, time_to_wait, time_now)
@@ -276,6 +294,7 @@ class LeakyBucket(object):
             self._add_stats(amt, False, time_now)
         if retry_time < 0:
             print(retry_time, self._total_wait, self._retry_queue)
+        #print(retry_time)
         raise RequestExceededException(
             requested_amt=amt, retry_time=retry_time)
 
