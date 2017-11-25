@@ -161,14 +161,53 @@ class TokenStatTracker(object):
             }
         )
 
+class ConsumptionRateTracker(object):
+    def __init__(self, time_utils=None):
+        if time_utils is None:
+            self._time_utils = TimeUtils()
+        self._last_consume_time = None
+        self._current_rates = []
+        self._max_length = 5
+
+    @property
+    def current_rate(self):
+        num_collected_rates = len(self._current_rates)
+        if not num_collected_rates:
+            return 0
+        return sum(self._current_rates)/float(num_collected_rates)
+
+    def get_projected_rate(self, amt, time_at_consumption):
+        individual_rate = self._get_rate_for_individual_point(
+            amt, time_at_consumption)
+        num_collected_rates = len(self._current_rates)
+        total_rates = num_collected_rates * self.current_rate + individual_rate
+        return total_rates/(num_collected_rates + 1)
+
+    def record_consumption_rate(self, amt, time_at_consumption):
+        rate = self._get_rate_for_individual_point(amt, time_at_consumption)
+        if self._last_consume_time is None:
+            self._last_consume_time = time_at_consumption
+        self._update_current_rates(rate)
+
+    def _get_rate_for_individual_point(self, amt, time_at_consumption):
+        if self._last_consume_time is None:
+            return 0
+        return amt/(time_at_consumption - self._last_consume_time)
+
+    def _update_current_rates(self, rate):
+        self._current_rates.append(rate)
+        if len(self._current_rates) > self._max_length:
+            self._current_rates.pop(0)
+
 
 class LeakyBucket(object):
     def __init__(self, rate, time_utils=None, stats=None):
-        self._rate = rate
+        self._max_rate = rate
         self._time_utils = time_utils
         if time_utils is None:
             self._time_utils = TimeUtils()
         self._lock = threading.Lock()
+        self._rate_tracker = ConsumptionRateTracker(self._time_utils)
         self._last_consume_time = None
         self.stats = stats
         self._retry_queue = collections.OrderedDict()
@@ -176,17 +215,16 @@ class LeakyBucket(object):
 
     def consume(self, amt, request_token):
         with self._lock:
-            if self._last_consume_time is None:
-                self._last_consume_time = self._time_utils.time()
-                return amt
-
             time_now = self._time_utils.time()
-            elapsed_time = time_now - self._last_consume_time
-            max_allowed_amt = self._rate * elapsed_time
+            projected_rate = self._rate_tracker.get_projected_rate(
+                amt, time_now)
+            #print(projected_rate)
+            #proposed_rate = time_now - self._last_consume_time
+            #max_allowed_amt = self._rate * elapsed_time
 
             if self._retry_queue:
                 if request_token not in self._retry_queue:
-                    allocated_time = amt/self._rate
+                    allocated_time = amt/self._max_rate
                     self._total_wait += allocated_time
                     self._add_to_retry_queue(
                         request_token, allocated_time, self._total_wait,
@@ -198,7 +236,7 @@ class LeakyBucket(object):
                         amt, request_token, time_now)
 
                 else:
-                    if amt > max_allowed_amt:
+                    if projected_rate > self._max_rate:
                         self._retry_for_premature_consume_request(
                             amt, request_token, time_now)
                     else:
@@ -207,8 +245,9 @@ class LeakyBucket(object):
                         self._total_wait -= scheduled_retry['slot_time']
                         return self._release_tokens(amt, time_now)
 
-            elif amt > max_allowed_amt:
-                retry_time = (amt - max_allowed_amt)/self._rate
+            elif projected_rate > self._max_rate:
+                print('here')
+                retry_time = amt/(projected_rate - self._max_rate)
                 self._total_wait += retry_time
                 self._add_to_retry_queue(
                     request_token, retry_time, retry_time, time_now)
@@ -243,7 +282,7 @@ class LeakyBucket(object):
     def _release_tokens(self, amt, time_now):
         if self.stats:
             self._add_stats(amt, True, time_now)
-        self._last_consume_time = time_now
+        self._rate_tracker.record_consumption_rate(amt, time_now)
         return amt
 
     def _add_stats(self, amt_requested, is_success, request_time):
