@@ -10,7 +10,6 @@
 # distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF
 # ANY KIND, either express or implied. See the License for the specific
 # language governing permissions and limitations under the License.
-import collections
 import time
 import threading
 
@@ -161,6 +160,98 @@ class TokenStatTracker(object):
             }
         )
 
+
+class LeakyBucket(object):
+    def __init__(self, rate, time_utils=None, stats=None):
+        self._max_rate = float(rate)
+        self._time_utils = time_utils
+        if time_utils is None:
+            self._time_utils = TimeUtils()
+        self._lock = threading.Lock()
+        self._rate_tracker = ConsumptionRateTracker(self._time_utils)
+        self._consumption_scheduler = ConsumptionScheduler()
+        self.stats = stats
+
+    def consume(self, amt, request_token):
+        with self._lock:
+            time_now = self._time_utils.time()
+            if self._consumption_scheduler.is_scheduled(request_token):
+                self._consume_for_scheduled_consumption(
+                    amt, request_token, time_now)
+            elif self._at_near_max_bandwidth_capacity():
+                return self._schedule_during_max_bandwidth_usage(
+                    amt, request_token, time_now)
+            elif self._projected_to_exceed_max_bandwidth(amt, time_now):
+                self._schedule_using_projected_rate(
+                    amt, request_token, time_now)
+            else:
+                return self._release_tokens(amt, time_now)
+
+    def _projected_to_exceed_max_bandwidth(self, amt, time_now):
+        projected_rate = self._rate_tracker.get_projected_rate(amt, time_now)
+        return projected_rate > self._max_rate
+
+    def _at_near_max_bandwidth_capacity(self):
+        return (self._rate_tracker.current_rate / self._max_rate) > 0.8
+
+    def _consume_for_scheduled_consumption(self, amt, request_token, time_now):
+        self._consumption_scheduler.process_scheduled_consumption(
+            request_token)
+        return self._release_tokens(amt, time_now)
+
+    def _schedule_during_max_bandwidth_usage(self, amt, request_token,
+                                             time_now):
+        allocated_time = amt/float(self._max_rate)
+        wait_time = self._consumption_scheduler.schedule_consumption(
+            amt, request_token, allocated_time)
+        self._raise_retry(amt, wait_time, time_now)
+
+    def _schedule_using_projected_rate(self, amt, request_token, time_now):
+        projected_rate = self._rate_tracker.get_projected_rate(
+            amt, time_now)
+        allocated_time = amt/(projected_rate - self._max_rate)
+        wait_time = self._consumption_scheduler.schedule_consumption(
+            amt, request_token, allocated_time)
+        self._raise_retry(amt, wait_time, time_now)
+
+    def _raise_retry(self, amt, retry_time, time_now):
+        if self.stats:
+            self._add_stats(amt, False, time_now)
+        raise RequestExceededException(
+            requested_amt=amt, retry_time=retry_time)
+
+    def _release_tokens(self, amt, time_now):
+        if self.stats:
+            self._add_stats(amt, True, time_now)
+        self._rate_tracker.record_consumption_rate(amt, time_now)
+        return amt
+
+    def _add_stats(self, amt_requested, is_success, request_time):
+        self.stats.add_consumption_stat(
+            amt_requested, is_success, request_time)
+
+
+class ConsumptionScheduler(object):
+    def __init__(self):
+        self._tokens_to_scheduled_consumption = {}
+        self._total_wait = 0
+
+    def is_scheduled(self, token):
+        return token in self._tokens_to_scheduled_consumption
+
+    def schedule_consumption(self, amt, token, time_to_consume):
+        self._total_wait += time_to_consume
+        self._tokens_to_scheduled_consumption[token] = {
+            'wait_duration': self._total_wait,
+            'time_to_consume': time_to_consume,
+        }
+        return self._total_wait
+
+    def process_scheduled_consumption(self, token):
+        scheduled_retry = self._tokens_to_scheduled_consumption.pop(token)
+        self._total_wait -= scheduled_retry['time_to_consume']
+
+
 class ConsumptionRateTracker(object):
     def __init__(self, time_utils=None):
         if time_utils is None:
@@ -197,215 +288,3 @@ class ConsumptionRateTracker(object):
         self._current_rates.append(rate)
         if len(self._current_rates) > self._max_length:
             self._current_rates.pop(0)
-
-
-class LeakyBucket(object):
-    def __init__(self, rate, time_utils=None, stats=None):
-        self._max_rate = float(rate)
-        self._time_utils = time_utils
-        if time_utils is None:
-            self._time_utils = TimeUtils()
-        self._lock = threading.Lock()
-        self._rate_tracker = ConsumptionRateTracker(self._time_utils)
-        self._last_consume_time = None
-        self.stats = stats
-        self._retry_queue = collections.OrderedDict()
-        self._total_wait = 0
-
-    def consume(self, amt, request_token):
-        with self._lock:
-            time_now = self._time_utils.time()
-            projected_rate = self._rate_tracker.get_projected_rate(
-                amt, time_now)
-            #print(projected_rate)
-            #proposed_rate = time_now - self._last_consume_time
-            #max_allowed_amt = self._rate * elapsed_time
-
-            if request_token in self._retry_queue or \
-                    self._at_near_max_bandwidth_capacity():
-                return self._consume_at_near_max_bandwidth(
-                    amt, request_token, time_now)
-
-            elif self._projected_to_exceed_max_bandwidth(amt, time_now):
-                projected_rate = self._rate_tracker.get_projected_rate(
-                    amt, time_now)
-                retry_time = amt/(projected_rate - self._max_rate)
-                self._total_wait += retry_time
-                self._add_to_retry_queue(
-                    request_token, retry_time, retry_time, time_now)
-                self._raise_retry(amt, retry_time, time_now)
-
-            else:
-                return self._release_tokens(amt, time_now)
-
-    def _projected_to_exceed_max_bandwidth(self, amt, time_now):
-        projected_rate = self._rate_tracker.get_projected_rate(amt, time_now)
-        return projected_rate > self._max_rate
-
-    def _at_near_max_bandwidth_capacity(self):
-        return (self._rate_tracker.current_rate / self._max_rate) > 0.8
-
-    def _consume_at_near_max_bandwidth(self, amt, request_token, time_now):
-        if request_token not in self._retry_queue:
-            allocated_time = amt/float(self._max_rate)
-            self._total_wait += allocated_time
-            self._add_to_retry_queue(
-                request_token, allocated_time, self._total_wait,
-                time_now)
-            self._raise_retry(amt, self._total_wait, time_now)
-
-        #elif request_token is not list(self._retry_queue)[0]:
-        #    self._retry_for_premature_consume_request(
-        #        amt, request_token, time_now)
-
-        else:
-            #print('clearing')
-            #if self._projected_to_exceed_max_bandwidth(amt, time_now):
-            #    self._retry_for_premature_consume_request(
-            #        amt, request_token, time_now)
-            #else:
-            print('actually clearing')
-            scheduled_retry = self._retry_queue.pop(
-                request_token)
-            self._total_wait -= scheduled_retry['slot_time']
-            return self._release_tokens(amt, time_now)
-
-
-    def _add_to_retry_queue(self, request_token, allocated_time, wait_duration,
-                            time_now):
-        self._retry_queue[request_token] = {
-            'wait_duration': wait_duration,
-            'slot_time': allocated_time,
-            'scheduled_time': time_now + wait_duration,
-        }
-
-    def _retry_for_premature_consume_request(self, amt, request_token,
-                                             time_now):
-        scheduled_retry = self._retry_queue[request_token]
-        #print(scheduled_retry)
-        #print(amt)
-        #print(self._max_rate)
-        time_to_wait = max(
-            scheduled_retry['scheduled_time'] - time_now, 0)
-        self._raise_retry(amt, time_to_wait, time_now)
-
-    def _raise_retry(self, amt, retry_time, time_now):
-        if self.stats:
-            self._add_stats(amt, False, time_now)
-        if retry_time < 0:
-            print(retry_time, self._total_wait, self._retry_queue)
-        #print(retry_time)
-        raise RequestExceededException(
-            requested_amt=amt, retry_time=retry_time)
-
-    def _release_tokens(self, amt, time_now):
-        if self.stats:
-            self._add_stats(amt, True, time_now)
-        self._rate_tracker.record_consumption_rate(amt, time_now)
-        return amt
-
-    def _add_stats(self, amt_requested, is_success, request_time):
-        self.stats.add_consumption_stat(
-            amt_requested, is_success, request_time)
-
-
-class LeakyBucketV0(object):
-    def __init__(self, rate, time_utils=None, stats=None):
-        self._rate = rate
-        self._time_utils = time_utils
-        if time_utils is None:
-            self._time_utils = TimeUtils()
-        self._lock = threading.Lock()
-        self._last_consume_time = None
-        self.stats = stats
-        self._request_tokens = collections.defaultdict(int)
-
-    def consume(self, amt, request_token=None):
-        with self._lock:
-            if self._last_consume_time is None:
-                self._last_consume_time = self._time_utils.time()
-                return amt
-
-            time_now = self._time_utils.time()
-            elapsed_time = time_now - self._last_consume_time
-            max_allowed_amt = self._rate * elapsed_time
-
-            if amt > max_allowed_amt:
-                if self.stats:
-                    self._add_stats(amt, False, time_now)
-
-                retry_time = (amt - max_allowed_amt)/self._rate
-                previous_time_waiting = self._request_tokens[request_token]
-                if previous_time_waiting > 5 * amt/float(self._rate):
-                    retry_time = 0.1 * retry_time
-                self._request_tokens[request_token] += retry_time
-                raise RequestExceededException(
-                    requested_amt=amt, retry_time=retry_time)
-
-            if self.stats:
-                self._add_stats(amt, True, time_now)
-            self._last_consume_time = self._time_utils.time()
-            self._request_tokens.pop(request_token, None)
-            return amt
-
-    def _add_stats(self, amt_requested, is_success, request_time):
-        self.stats.add_consumption_stat(
-            amt_requested, is_success, request_time)
-
-
-class TokenBucket(object):
-    def __init__(self, refill_rate, time_utils=None, stats=None):
-        """Limits bandwidths using a token bucket algorithm
-
-        :type refill_rate: int
-        :param refill_rate: The rate in which to refill tokens. The rate
-            is in terms of tokens per second.
-
-        :type time_utils: TimeUtils()
-        :param time_utils: The time utility to use for interacting with time.
-        """
-        self._refill_rate = refill_rate
-        self._tokens = 0
-        self._time_utils = time_utils
-        if time_utils is None:
-            self._time_utils = TimeUtils()
-        self._lock = threading.Lock()
-        self._last_time = None
-        self.stats = stats
-
-    def consume(self, amt):
-        """Consume a specified amt of tokens
-
-        :type amt: int
-        :param amt: The number of tokens requesting to consume
-
-        :raises RequestExceededException: If the amount of tokens requested
-            exceeds the number of tokens available.
-
-        :rtype: int
-        :returns: The number of tokens allowed to consume
-        """
-        with self._lock:
-            if self._last_time is None:
-                self._last_time = self._time_utils.time()
-
-            time_now = self._time_utils.time()
-            elapsed_time = time_now - self._last_time
-            self._last_time = time_now
-
-            self._tokens += int(self._refill_rate * elapsed_time)
-            if amt > self._tokens:
-                if self.stats:
-                    self._add_stats(amt, False, time_now)
-                retry_time = (amt - self._tokens)/float(self._refill_rate)
-                raise RequestExceededException(
-                    requested_amt=amt, retry_time=retry_time)
-
-            if self.stats:
-                self._add_stats(amt, True, time_now)
-            self._tokens = self._tokens - amt
-            return amt
-
-    def _add_stats(self, amt_requested, is_success, request_time):
-        self.stats.add_consumption_stat(
-            amt_requested, is_success, request_time)

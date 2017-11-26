@@ -35,7 +35,6 @@ from s3transfer.download import DownloadSubmissionTask
 from s3transfer.upload import UploadSubmissionTask
 from s3transfer.copies import CopySubmissionTask
 from s3transfer.delete import DeleteSubmissionTask
-from s3transfer.bandwidth import TokenBucket
 from s3transfer.bandwidth import LeakyBucket
 from s3transfer.bandwidth import TokenStatTracker
 from s3transfer.bandwidth import BandwidthLimiter
