@@ -249,42 +249,42 @@ class ConsumptionScheduler(object):
 
     def process_scheduled_consumption(self, token):
         scheduled_retry = self._tokens_to_scheduled_consumption.pop(token)
-        self._total_wait -= scheduled_retry['time_to_consume']
+        self._total_wait = max(
+            self._total_wait - scheduled_retry['time_to_consume'], 0)
 
 
 class ConsumptionRateTracker(object):
     def __init__(self, time_utils=None):
         if time_utils is None:
             self._time_utils = TimeUtils()
-        self._last_consume_time = None
-        self._current_rates = []
-        self._max_length = 20
+        self._tracked_consumptions = []
+        self._total_consumed = 0
+        self._max_length = 10
 
     @property
     def current_rate(self):
-        num_collected_rates = len(self._current_rates)
-        if not num_collected_rates:
+        if len(self._tracked_consumptions) <= 1:
             return 0
-        return sum(self._current_rates)/float(num_collected_rates)
+        time_delta = float(self._latest_time_point - self._oldest_time_point)
+        return self._total_consumed/time_delta
+
+    @property
+    def _oldest_time_point(self):
+        return self._tracked_consumptions[0][1]
+
+    @property
+    def _latest_time_point(self):
+        return self._tracked_consumptions[-1][1]
 
     def get_projected_rate(self, amt, time_at_consumption):
-        individual_rate = self._get_rate_for_individual_point(
-            amt, time_at_consumption)
-        num_collected_rates = len(self._current_rates)
-        total_rates = num_collected_rates * self.current_rate + individual_rate
-        return total_rates/(num_collected_rates + 1)
+        if not self._tracked_consumptions:
+            return 0
+        time_delta = time_at_consumption - self._oldest_time_point
+        return (self._total_consumed + amt)/time_delta
 
     def record_consumption_rate(self, amt, time_at_consumption):
-        rate = self._get_rate_for_individual_point(amt, time_at_consumption)
-        self._last_consume_time = time_at_consumption
-        self._update_current_rates(rate)
-
-    def _get_rate_for_individual_point(self, amt, time_at_consumption):
-        if self._last_consume_time is None:
-            return 0
-        return amt/(time_at_consumption - self._last_consume_time)
-
-    def _update_current_rates(self, rate):
-        self._current_rates.append(rate)
-        if len(self._current_rates) > self._max_length:
-            self._current_rates.pop(0)
+        self._tracked_consumptions.append((amt, time_at_consumption))
+        self._total_consumed += amt
+        if len(self._tracked_consumptions) > self._max_length:
+            old_amt, _ = self._tracked_consumptions.pop(0)
+            self._total_consumed -= old_amt
