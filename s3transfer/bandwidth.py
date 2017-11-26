@@ -178,21 +178,14 @@ class LeakyBucket(object):
             if self._consumption_scheduler.is_scheduled(request_token):
                 self._consume_for_scheduled_consumption(
                     amt, request_token, time_now)
-            elif self._at_near_max_bandwidth_capacity():
+            elif self._at_max_bandwidth_capacity():
                 return self._schedule_during_max_bandwidth_usage(
-                    amt, request_token, time_now)
-            elif self._projected_to_exceed_max_bandwidth(amt, time_now):
-                self._schedule_using_projected_rate(
                     amt, request_token, time_now)
             else:
                 return self._release_tokens(amt, time_now)
 
-    def _projected_to_exceed_max_bandwidth(self, amt, time_now):
-        projected_rate = self._rate_tracker.get_projected_rate(amt, time_now)
-        return projected_rate > self._max_rate
-
-    def _at_near_max_bandwidth_capacity(self):
-        return (self._rate_tracker.current_rate / self._max_rate) > 0.8
+    def _at_max_bandwidth_capacity(self):
+        return (self._rate_tracker.current_rate / self._max_rate) > 1
 
     def _consume_for_scheduled_consumption(self, amt, request_token, time_now):
         self._consumption_scheduler.process_scheduled_consumption(
@@ -202,14 +195,6 @@ class LeakyBucket(object):
     def _schedule_during_max_bandwidth_usage(self, amt, request_token,
                                              time_now):
         allocated_time = amt/float(self._max_rate)
-        wait_time = self._consumption_scheduler.schedule_consumption(
-            amt, request_token, allocated_time)
-        self._raise_retry(amt, wait_time, time_now)
-
-    def _schedule_using_projected_rate(self, amt, request_token, time_now):
-        projected_rate = self._rate_tracker.get_projected_rate(
-            amt, time_now)
-        allocated_time = amt/(projected_rate - self._max_rate)
         wait_time = self._consumption_scheduler.schedule_consumption(
             amt, request_token, allocated_time)
         self._raise_retry(amt, wait_time, time_now)
@@ -275,12 +260,6 @@ class ConsumptionRateTracker(object):
     @property
     def _latest_time_point(self):
         return self._tracked_consumptions[-1][1]
-
-    def get_projected_rate(self, amt, time_at_consumption):
-        if not self._tracked_consumptions:
-            return 0
-        time_delta = time_at_consumption - self._oldest_time_point
-        return (self._total_consumed + amt)/time_delta
 
     def record_consumption_rate(self, amt, time_at_consumption):
         self._tracked_consumptions.append((amt, time_at_consumption))
