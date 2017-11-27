@@ -79,7 +79,7 @@ class BandwidthLimiter(object):
 
 class BandwidthLimitedStream(object):
     def __init__(self, fileobj, token_bucket, transfer_coordinator,
-                 time_utils=None):
+                 time_utils=None, bytes_threshold=256 * 1024):
         """Limits bandwidth for reads on a wrapped stream
 
         :type fileobj: file-like object
@@ -104,6 +104,8 @@ class BandwidthLimitedStream(object):
             self._time_utils = TimeUtils()
         self._enabled = True
         self._request_token = object()
+        self._bytes_seen = 0
+        self._bytes_threshold = bytes_threshold
 
     def enable(self):
         """Enable bandwidth limiting on reads to the stream"""
@@ -121,9 +123,14 @@ class BandwidthLimitedStream(object):
         if not self._enabled:
             return self._fileobj.read(amount)
 
+        self._bytes_seen += amount
+        if self._bytes_seen < self._bytes_threshold:
+            return self._fileobj.read(amount)
         while not self._transfer_coordinator.exception:
             try:
-                self._token_bucket.consume(amount, self._request_token)
+                self._token_bucket.consume(
+                    self._bytes_seen, self._request_token)
+                self._bytes_seen = 0
                 return self._fileobj.read(amount)
             except RequestExceededException as e:
                 self._time_utils.sleep(e.retry_time)
