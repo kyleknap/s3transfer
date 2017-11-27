@@ -39,16 +39,16 @@ def random_file_extension(num_digits=8):
     return ''.join(random.choice(string.hexdigits) for _ in range(num_digits))
 
 
-def disable_upload_callbacks(request, operation_name, **kwargs):
+def signal_transfer_end(request, operation_name, **kwargs):
     if operation_name in ['PutObject', 'UploadPart'] and \
-            hasattr(request.body, 'disable_callback'):
-        request.body.disable_callback()
+            hasattr(request.body, 'signal_transfer_end'):
+        request.body.signal_transfer_end()
 
 
-def enable_upload_callbacks(request, operation_name, **kwargs):
+def signal_transfer_start(request, operation_name, **kwargs):
     if operation_name in ['PutObject', 'UploadPart'] and \
-            hasattr(request.body, 'enable_callback'):
-        request.body.enable_callback()
+            hasattr(request.body, 'signal_transfer_start'):
+        request.body.signal_transfer_start()
 
 
 def calculate_range_parameter(part_size, part_index, num_parts,
@@ -433,15 +433,21 @@ class ReadFileChunk(object):
             invoke_progress_callbacks(self._callbacks, len(data))
         return data
 
+    def signal_transfer_start(self):
+        self.enable_callback()
+        if hasattr(self._fileobj, 'signal_transfer_start'):
+            self._fileobj.signal_transfer_start()
+
+    def signal_transfer_end(self):
+        self.disable_callback()
+        if hasattr(self._fileobj, 'signal_transfer_end'):
+            self._fileobj.signal_transfer_end()
+
     def enable_callback(self):
         self._callbacks_enabled = True
-        if hasattr(self._fileobj, 'enable'):
-            self._fileobj.enable()
 
     def disable_callback(self):
         self._callbacks_enabled = False
-        if hasattr(self._fileobj, 'disable'):
-            self._fileobj.disable()
 
     def seek(self, where):
         self._fileobj.seek(self._start_byte + where)

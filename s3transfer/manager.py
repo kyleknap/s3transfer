@@ -17,8 +17,8 @@ import threading
 from botocore.compat import six
 
 from s3transfer.utils import get_callbacks
-from s3transfer.utils import disable_upload_callbacks
-from s3transfer.utils import enable_upload_callbacks
+from s3transfer.utils import signal_transfer_end
+from s3transfer.utils import signal_transfer_start
 from s3transfer.utils import CallArgs
 from s3transfer.utils import OSUtils
 from s3transfer.utils import TaskSemaphore
@@ -506,11 +506,11 @@ class TransferManager(object):
         # Register handlers to enable/disable callbacks on uploads.
         event_name = 'request-created.s3'
         self._client.meta.events.register_first(
-            event_name, disable_upload_callbacks,
-            unique_id='s3upload-callback-disable')
+            event_name, signal_transfer_end,
+            unique_id='s3upload-transfer-end')
         self._client.meta.events.register_last(
-            event_name, enable_upload_callbacks,
-            unique_id='s3upload-callback-enable')
+            event_name, signal_transfer_start,
+            unique_id='s3upload-transfer-start')
 
     def __enter__(self):
         return self

@@ -137,6 +137,16 @@ class BandwidthLimitedStream(object):
         else:
             raise self._transfer_coordinator.exception
 
+    def signal_transfer_start(self):
+        self.enable()
+        if hasattr(self._fileobj, 'signal_transfer_start'):
+            self._fileobj.signal_transfer_start()
+
+    def signal_transfer_end(self):
+        self.disable()
+        if hasattr(self._fileobj, 'signal_transfer_end'):
+            self._fileobj.signal_transfer_end()
+
     def seek(self, where):
         self._fileobj.seek(where)
 
