@@ -1,0 +1,32 @@
+#!/usr/bin/env python
+import argparse
+import multiprocessing
+from s3transfer.processpool import ProcessPoolDownloader, ProcessTransferConfig
+
+MB = 1024 * 1024
+
+
+def download(bucket, key, filename, num_processes, mb_chunksize):
+    config = ProcessTransferConfig(
+        multipart_chunksize=mb_chunksize * MB,
+        max_request_processes=num_processes
+    )
+    with ProcessPoolDownloader(config=config) as downloader:
+        downloader.download_file(bucket=bucket, key=key, filename=filename)
+
+
+def main():
+    #multiprocessing.set_start_method('spawn')
+    parser = argparse.ArgumentParser()
+    parser.add_argument('-b', '--bucket', required=True)
+    parser.add_argument('-k', '--key', required=True)
+    parser.add_argument('-f', '--filename', required=True)
+    parser.add_argument('-p', '--num-processes', type=int, default=10)
+    parser.add_argument('-c', '--mb-chunksize', type=int, default=8)
+    args = parser.parse_args()
+    download(args.bucket, args.key, args.filename, args.num_processes,
+             args.mb_chunksize)
+
+
+if __name__ == '__main__':
+    main()
