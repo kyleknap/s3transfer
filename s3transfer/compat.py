@@ -11,6 +11,7 @@
 # ANY KIND, either express or implied. See the License for the specific
 # language governing permissions and limitations under the License.
 import inspect
+import itertools
 import sys
 import os
 import errno
@@ -46,12 +47,15 @@ if six.PY3:
     # ConnectionError
     SOCKET_ERROR = ConnectionError
     MAXINT = None
+    filter = filter
+
 else:
     def accepts_kwargs(func):
         return inspect.getargspec(func)[2]
 
     SOCKET_ERROR = socket.error
     MAXINT = sys.maxint
+    filter = itertools.filter
 
 
 def seekable(fileobj):

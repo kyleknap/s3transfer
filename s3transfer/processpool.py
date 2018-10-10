@@ -13,11 +13,13 @@
 import logging
 import math
 import os
+import time
 from multiprocessing import Process
 
 from botocore.session import Session
 
 from s3transfer.compat import rename_file
+from s3transfer.compat import filter
 from s3transfer.download import S3_RETRYABLE_ERRORS
 from s3transfer.download import RetriesExceededError
 from s3transfer.download import DownloadChunkIterator
@@ -161,7 +163,7 @@ class ProcessPoolDownloader(object):
                 'Process %s had rc of %s' % (process.pid, process.exitcode))
 
     def shutdown(self):
-        """Shutsdown the downloader
+        """Shutdown the downloader
 
         It will wait till all downloads are complete before returning.
         """
@@ -177,11 +179,26 @@ class ProcessPoolDownloader(object):
 class ProcessTaskSpawner(object):
     def __init__(self, max_processes):
         self._max_processes = max_processes
-        self._num_active_processes = 0
+        self._process_count = 0
+        self._processes = []
 
     def spawn(self, func, *args, **kwargs):
+        self._clear_completed_process()
+        while self._process_count == self._max_processes:
+            time.sleep(0.1)
+            self._clear_completed_process()
+        return self._spawn_process(func, args, kwargs)
+
+    def _clear_completed_process(self):
+        self._processes = list(
+            filter(lambda p: p.exitcode is None, self._processes))
+        self._process_count = len(self._processes)
+
+    def _spawn_process(self, func, args, kwargs):
         process = Process(target=func, args=args, kwargs=kwargs)
         process.start()
+        self._process_count += 1
+        self._processes.append(process)
         return process
 
 
