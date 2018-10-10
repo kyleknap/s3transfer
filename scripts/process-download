@@ -1,0 +1,21 @@
+#!/usr/bin/env python
+import argparse
+from s3transfer.processpool import ProcessPoolDownloader
+
+
+def download(bucket, key, filename):
+    downloader = ProcessPoolDownloader()
+    downloader.download_file(bucket=bucket, key=key, filename=filename)
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('-b', '--bucket', required=True)
+    parser.add_argument('-k', '--key', required=True)
+    parser.add_argument('-f', '--filename', required=True)
+    args = parser.parse_args()
+    download(args.bucket, args.key, args.filename)
+
+
+if __name__ == '__main__':
+    main()
