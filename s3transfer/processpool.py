@@ -28,7 +28,9 @@ from s3transfer.utils import calculate_range_parameter
 
 logger = logging.getLogger(__name__)
 
+KB = 1024
 MB = 1024 * 1024
+IO_CHUNKSIZE = 256 * 1024
 
 
 class ProcessTransferConfig(object):
@@ -153,14 +155,17 @@ class ProcessPoolDownloader(object):
                 client_kwargs=self._client_kwargs
             )
             processes.append(p)
-        for p in processes:
-            self._wait_for_process(p)
+            processes = self._join_processes(processes)
+        self._join_processes(processes, wait=True)
 
-    def _wait_for_process(self, process):
-        process.join()
-        if process.exitcode != 0:
-            raise RuntimeError(
-                'Process %s had rc of %s' % (process.pid, process.exitcode))
+    def _join_processes(self, processes, wait=False):
+        inprogress_processes = []
+        for process in processes:
+            if wait or process.exitcode is not None:
+                process.join()
+            else:
+                inprogress_processes.append(process)
+        return inprogress_processes
 
     def shutdown(self):
         """Shutdown the downloader
@@ -212,26 +217,26 @@ def get_object(bucket, key, filename, extra_args=None, offset=0,
         client_kwargs = {}
 
     client = session.create_client('s3', **client_kwargs)
-    with open(filename, 'wb') as f:
-        for i in range(max_attempts):
-            try:
-                _do_get_object(
-                    client=client, bucket=bucket, key=key, fileobj=f,
-                    offset=offset, extra_args=extra_args
-                )
-                return
-            except S3_RETRYABLE_ERRORS as e:
-                logger.debug("Retrying exception caught (%s), "
-                             "retrying request, (attempt %s / %s)", e, i,
-                             max_attempts, exc_info=True)
-                last_exception = e
+    for i in range(max_attempts):
+        try:
+            _do_get_object(
+                client=client, bucket=bucket, key=key, filename=filename,
+                offset=offset, extra_args=extra_args
+            )
+            return
+        except S3_RETRYABLE_ERRORS as e:
+            logger.debug("Retrying exception caught (%s), "
+                         "retrying request, (attempt %s / %s)", e, i,
+                         max_attempts, exc_info=True)
+            last_exception = e
 
-            raise RetriesExceededError(last_exception)
+        raise RetriesExceededError(last_exception)
 
 
-def _do_get_object(client, bucket, key, fileobj, offset, extra_args):
+def _do_get_object(client, bucket, key, filename, offset, extra_args):
     response = client.get_object(Bucket=bucket, Key=key, **extra_args)
-    chunks = DownloadChunkIterator(response['Body'], 1024)
-    fileobj.seek(offset)
-    for chunk in chunks:
-        fileobj.write(chunk)
+    with open(filename, 'wb') as f:
+        f.seek(offset)
+        chunks = DownloadChunkIterator(response['Body'], IO_CHUNKSIZE)
+        for chunk in chunks:
+            f.write(chunk)
