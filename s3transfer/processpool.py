@@ -14,7 +14,7 @@ import logging
 import math
 import os
 import time
-from multiprocessing import Process
+from multiprocessing import Pool
 
 from botocore.session import Session
 
@@ -74,9 +74,7 @@ class ProcessPoolDownloader(object):
         if config is None:
             self._config = ProcessTransferConfig()
 
-        self._spawner = ProcessTaskSpawner(
-            max_processes=self._config.max_request_processes
-        )
+        self._pool = Pool(self._config.max_request_processes)
 
         self._session = Session()
         self._client = self._session.create_client('s3', **self._client_kwargs)
@@ -141,7 +139,7 @@ class ProcessPoolDownloader(object):
     def _do_ranged_download(self, bucket, key, filename, extra_args, size):
         part_size = self._config.multipart_chunksize
         num_parts = int(math.ceil(size / float(part_size)))
-        processes = []
+        results = []
         for i in range(num_parts):
             offset = i * self._config.multipart_chunksize
             # Calculate the range parameter
@@ -149,23 +147,21 @@ class ProcessPoolDownloader(object):
                 part_size, i, num_parts)
             get_object_kwargs = {'Range': range_parameter}
             get_object_kwargs.update(extra_args)
-            p = self._spawner.spawn(
-                get_object, bucket=bucket, key=key,
-                filename=filename, extra_args=get_object_kwargs, offset=offset,
-                client_kwargs=self._client_kwargs
-            )
-            processes.append(p)
-            processes = self._join_processes(processes)
-        self._join_processes(processes, wait=True)
+            func_kwargs = {
+                'bucket': bucket,
+                'key': key,
+                'filename': filename,
+                'extra_args': get_object_kwargs,
+                'offset': offset,
+                'client_kwargs': self._client_kwargs,
+            }
+            result = self._pool.apply_async(get_object, kwds=func_kwargs)
+            results.append(result)
+        self._wait_for_results(results)
 
-    def _join_processes(self, processes, wait=False):
-        inprogress_processes = []
-        for process in processes:
-            if wait or process.exitcode is not None:
-                process.join()
-            else:
-                inprogress_processes.append(process)
-        return inprogress_processes
+    def _wait_for_results(self, results):
+        for result in results:
+            result.wait()
 
     def shutdown(self):
         """Shutdown the downloader
@@ -179,32 +175,6 @@ class ProcessPoolDownloader(object):
 
     def __exit__(self, *args):
         self.shutdown()
-
-
-class ProcessTaskSpawner(object):
-    def __init__(self, max_processes):
-        self._max_processes = max_processes
-        self._process_count = 0
-        self._processes = []
-
-    def spawn(self, func, *args, **kwargs):
-        self._clear_completed_process()
-        while self._process_count == self._max_processes:
-            time.sleep(0.1)
-            self._clear_completed_process()
-        return self._spawn_process(func, args, kwargs)
-
-    def _clear_completed_process(self):
-        self._processes = list(
-            filter(lambda p: p.exitcode is None, self._processes))
-        self._process_count = len(self._processes)
-
-    def _spawn_process(self, func, args, kwargs):
-        process = Process(target=func, args=args, kwargs=kwargs)
-        process.start()
-        self._process_count += 1
-        self._processes.append(process)
-        return process
 
 
 def get_object(bucket, key, filename, extra_args=None, offset=0,
