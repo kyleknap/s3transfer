@@ -15,18 +15,19 @@ import logging
 import math
 import os
 from collections import namedtuple
-from multiprocessing import Process, Queue, Lock, Manager
+from multiprocessing import Process, Queue
+from multiprocessing.managers import BaseManager
 try:
     from multiprocessing import SimpleQueue
 except ImportError:
     from multiprocessing.queues import SimpleQueue
-
-import multiprocessing.heap
+import threading
 
 from botocore.session import Session
 
 from s3transfer.compat import rename_file
 from s3transfer.futures import TransferFuture
+from s3transfer.futures import TransferCoordinator
 from s3transfer.download import S3_RETRYABLE_ERRORS
 from s3transfer.download import RetriesExceededError
 from s3transfer.utils import random_file_extension
@@ -39,40 +40,14 @@ MB = 1024 * 1024
 DownloadFileRequest = namedtuple(
     'DownloadFileRequest',
     ['bucket', 'key', 'filename', 'extra_args',  'expected_size',
-     'coordinator']
+     'transfer_id']
 )
 GetObjectJob = namedtuple(
     'GetObjectJob',
     ['bucket', 'key', 'filename', 'extra_args', 'offset', 'final_filename',
-     'coordinator']
+     'transfer_id']
 )
 SHUTDOWN = 1
-
-
-class SharedIntValue(object):
-    def __init__(self, value):
-        size = ctypes.sizeof(ctypes.c_int)
-        self._wrapper = multiprocessing.heap.BufferWrapper(size)
-        buf = self._wrapper.create_memoryview()
-        obj = ctypes.c_int.from_buffer(buf)
-        ctypes.memset(ctypes.addressof(obj), 0, size)
-        obj.__init__(value)
-        self._value = obj
-
-    def __setstate__(self, state):
-        print(state)
-        self.__dict__.update(state)
-        buf = self._wrapper.create_memoryview()
-        self._value = ctypes.c_int.from_buffer(buf)
-
-    @property
-    def value(self):
-        return self._value.value
-
-    @value.setter
-    def value(self, val):
-        self._value.value = val
-
 
 
 class ProcessTransferConfig(object):
@@ -116,11 +91,13 @@ class ProcessPoolDownloader(object):
         if config is None:
             self._transfer_config = ProcessTransferConfig()
 
-        self._manager = Manager()
+        self._manager = MyManager()
+        self._manager.start()
+        self._monitor = self._manager.TransferMonitor()
         self._submitter = Submitter(
             transfer_config=self._transfer_config,
             client_kwargs=self._client_kwargs,
-            manager=self._manager
+            monitor=self._monitor
         )
 
 
@@ -150,17 +127,20 @@ class ProcessPoolDownloader(object):
         :rtype: s3transfer.futures.TransferFuture
         :returns: Transfer future representing the download
         """
-        coordinator = ProcessTransferCoordinator(self._manager)
+        transfer_id = 1
+        #coordinator = self._xfer_manager.create_coordinator(transfer_id)
+        #print('created coord', self._xfer_manager.get_coordinator(transfer_id))
         if extra_args is None:
             extra_args = {}
         self._submitter.submit(
             DownloadFileRequest(
                 bucket=bucket, key=key, filename=filename,
                 extra_args=extra_args, expected_size=expected_size,
-                coordinator=coordinator
+                transfer_id=transfer_id
             )
         )
-        return TransferFuture(coordinator=coordinator)
+        return ProcessTransferFuture(self._monitor)
+        #return TransferFuture(coordinator=coordinator)
 
     def start(self):
         self._submitter.start()
@@ -171,6 +151,7 @@ class ProcessPoolDownloader(object):
         It will wait till all downloads are complete before returning.
         """
         self._submitter.shutdown()
+        #self._manager.shutdown()
 
     def __enter__(self):
         self.start()
@@ -180,30 +161,55 @@ class ProcessPoolDownloader(object):
         self.shutdown()
 
 
-class ProcessTransferCoordinator(object):
-    def __init__(self, manager):
-        self._jobs_till_complete = SharedIntValue(0)
-        self.done_event = manager.Event()
+class ProcessTransferFuture(object):
+    def __init__(self, monitor):
+        self._monitor = monitor
 
-    @property
-    def jobs_till_complete(self):
-        return self._jobs_till_complete.value
+    def result(self):
+        pass
 
-    @jobs_till_complete.setter
-    def jobs_till_complete(self, val):
-        self._jobs_till_complete.value = val
+    def done(self):
+        pass
+
+    def __del__(self):
+        print('delete')
+        self._monitor.delete()
+
+
+class MyManager(BaseManager):
+    pass
+
+
+class TransferMonitor(object):
+    def __init__(self):
+        self._transfers = {}
+        self._lock = threading.Lock()
+
+    def set_expected_jobs_to_complete(self, transfer_id, num_jobs):
+        self._transfers[transfer_id] = num_jobs
+
+    def announce_job_complete(self, transfer_id):
+        with self._lock:
+            self._transfers[transfer_id] -= 1
+            return self._transfers[transfer_id]
+
+    def delete(self):
+        print('Called!')
+
+
+MyManager.register('TransferMonitor', TransferMonitor)
 
 
 class Submitter(Process):
-    def __init__(self, transfer_config, client_kwargs, manager):
+    def __init__(self, transfer_config, client_kwargs, monitor):
         super(Submitter, self).__init__()
         self._transfer_config = transfer_config
         self._client_kwargs = client_kwargs
-        self._request_queue = manager.Queue(1000)
+        self._request_queue = Queue(1000)
         self._worker_queue = SimpleQueue()
-        self._lock = Lock()
         self._max_workers = self._transfer_config.max_request_processes
         self._workers = []
+        self._monitor = monitor
         self._client = None
 
     def run(self):
@@ -233,7 +239,7 @@ class Submitter(Process):
         for _ in range(self._max_workers):
             print('starting worker')
             worker = GetObjectWorker(
-                self._worker_queue, self._client_kwargs, self._lock)
+                self._worker_queue, self._client_kwargs, self._monitor)
             worker.start()
             self._workers.append(worker)
 
@@ -245,7 +251,7 @@ class Submitter(Process):
             filename=temp_filename, transfer_config=self._transfer_config,
             extra_args=request.extra_args, client_kwargs=self._client_kwargs,
             size=size, final_filename=request.filename,
-            coordinator=request.coordinator
+            monitor=self._monitor, transfer_id=request.transfer_id
         )
         for job in job_generator:
             self._worker_queue.put(job)
@@ -269,7 +275,7 @@ class Submitter(Process):
 class GetObjectJobGenerator(object):
     def __init__(self, bucket, key, filename, transfer_config, extra_args=None,
                  client_kwargs=None, size=None, final_filename=None,
-                 coordinator=None):
+                 monitor=None, transfer_id=None):
         self._bucket = bucket
         self._key = key
         self._filename = filename
@@ -278,11 +284,12 @@ class GetObjectJobGenerator(object):
         self._transfer_config = transfer_config
         self._size = size
         self._final_filename = final_filename
-        self._coordinator = coordinator
+        self._monitor = monitor
+        self._transfer_id = transfer_id
 
     def __iter__(self):
         if self._size < self._transfer_config.multipart_threshold:
-            self._coordinator.jobs_till_complete = 1
+            self._monitor.set_expected_jobs_to_complete(self._transfer_id, 1)
             yield GetObjectJob(
                 bucket=self._bucket,
                 key=self._key,
@@ -290,12 +297,13 @@ class GetObjectJobGenerator(object):
                 offset=0,
                 extra_args=self._extra_args,
                 final_filename=self._final_filename,
-                coordinator=self._coordinator,
+                transfer_id=self._transfer_id,
             )
         else:
             part_size = self._transfer_config.multipart_chunksize
             num_parts = int(math.ceil(self._size / float(part_size)))
-            self._coordinator.jobs_till_complete = num_parts
+            self._monitor.set_expected_jobs_to_complete(
+                self._transfer_id, num_parts)
             for i in range(num_parts):
                 offset = i * self._transfer_config.multipart_chunksize
                 # Calculate the range parameter
@@ -310,7 +318,7 @@ class GetObjectJobGenerator(object):
                     offset=offset,
                     extra_args=get_object_kwargs,
                     final_filename=self._final_filename,
-                    coordinator=self._coordinator,
+                    transfer_id=self._transfer_id,
                 )
         raise StopIteration()
 
@@ -319,11 +327,11 @@ class GetObjectWorker(Process):
     _MAX_ATTEMPTS = 5
     _IO_CHUNKSIZE = 2 * MB
 
-    def __init__(self, queue, client_kwargs, lock):
+    def __init__(self, queue, client_kwargs, monitor):
         super(GetObjectWorker, self).__init__()
         self._queue = queue
         self._client_kwargs = client_kwargs
-        self._lock = lock
+        self._monitor = monitor
         self._client = None
 
     def run(self):
@@ -333,7 +341,7 @@ class GetObjectWorker(Process):
             if job == SHUTDOWN:
                 return
             try:
-                print('got get object job')
+                #print('got get object job')
                 self._do_get_object(
                     bucket=job.bucket, key=job.key, filename=job.filename,
                     extra_args=job.extra_args, offset=job.offset
@@ -341,12 +349,11 @@ class GetObjectWorker(Process):
             except Exception as e:
                 print(e)
             finally:
-                with self._lock:
-                    print(job.coordinator.jobs_till_complete)
-                    job.coordinator.jobs_till_complete -= 1
-                    if job.coordinator.jobs_till_complete == 0:
-                        rename_file(job.filename, job.final_filename)
-                        job.coordinator.done_event.set()
+                remaining = self._monitor.announce_job_complete(
+                    job.transfer_id)
+                #print(remaining)
+                if not remaining:
+                    rename_file(job.filename, job.final_filename)
 
     def _do_get_object(self, bucket, key, extra_args, filename, offset):
         for i in range(self._MAX_ATTEMPTS):

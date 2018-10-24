@@ -141,10 +141,21 @@ class TransferCoordinator(object):
         self._associated_futures_lock = threading.Lock()
         self._done_callbacks_lock = threading.Lock()
         self._failure_cleanups_lock = threading.Lock()
+        self._jobs_till_complete_lock = threading.Lock()
+        self._jobs_till_complete = 0
 
     def __repr__(self):
         return '%s(transfer_id=%s)' % (
             self.__class__.__name__, self.transfer_id)
+
+    @property
+    def jobs_till_complete(self):
+        return self._jobs_till_complete
+
+    @jobs_till_complete.setter
+    def jobs_till_complete(self, val):
+        with self._jobs_till_complete:
+            self._jobs_till_complete = val
 
     @property
     def exception(self):
