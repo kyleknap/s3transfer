@@ -1,0 +1,49 @@
+#!/usr/bin/env python
+"""
+Downloads a file using s3transfer.processpool.ProcessPoolDownloader
+
+Usage
+=====
+
+NOTE: Make sure you run ``pip install -r requirements-dev.txt`` before running.
+
+To download a file::
+
+    ./proccesspool-download -f myfilename -b mybucket -k mykey
+"""
+import argparse
+from s3transfer.processpool import ProcessPoolDownloader, ProcessTransferConfig
+
+MB = 1024 * 1024
+
+
+def download(bucket, key, filename, num_processes, mb_chunksize):
+    config = ProcessTransferConfig(
+        multipart_chunksize=mb_chunksize * MB,
+        max_request_processes=num_processes
+    )
+    with ProcessPoolDownloader(config=config) as downloader:
+        downloader.download_file(bucket=bucket, key=key, filename=filename)
+
+
+def main():
+    parser = argparse.ArgumentParser(usage=__doc__)
+    parser.add_argument('-b', '--bucket', required=True,
+                        help='The S3 bucket to download the file from')
+    parser.add_argument('-k', '--key', required=True,
+                        help='The key to download from')
+    parser.add_argument('-f', '--filename', required=True,
+                        help='The name of file to download to')
+    parser.add_argument(
+        '-p', '--num-processes', type=int, default=10,
+        help='The number of processes to run the download. 10 by default.')
+    parser.add_argument(
+        '-c', '--mb-chunksize', type=int, default=8,
+        help='The part size in MB to use for the download. 8 MB by default.')
+    args = parser.parse_args()
+    download(args.bucket, args.key, args.filename, args.num_processes,
+             args.mb_chunksize)
+
+
+if __name__ == '__main__':
+    main()
