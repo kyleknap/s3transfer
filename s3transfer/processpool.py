@@ -20,11 +20,16 @@ import botocore.session
 
 from s3transfer.constants import MB
 from s3transfer.constants import ALLOWED_DOWNLOAD_ARGS
+from s3transfer.compat import MAXINT
+from s3transfer.exceptions import CancelledError
 from s3transfer.exceptions import RetriesExceededError
+from s3transfer.futures import BaseTransferFuture
+from s3transfer.futures import BaseTransferMeta
 from s3transfer.utils import S3_RETRYABLE_DOWNLOAD_ERRORS
 from s3transfer.utils import calculate_num_parts
 from s3transfer.utils import calculate_range_parameter
 from s3transfer.utils import OSUtils
+from s3transfer.utils import CallArgs
 
 logger = logging.getLogger(__name__)
 
@@ -136,15 +141,18 @@ class ProcessPoolDownloader(object):
         if extra_args is None:
             extra_args = {}
         self._validate_all_known_args(extra_args)
+        call_args = CallArgs(
+            bucket=bucket, key=key, filename=filename, extra_args=extra_args,
+            expected_size=expected_size)
+        future = self._get_transfer_future(call_args)
         self._submitter_queue.put(
             DownloadFileJob(
-                transfer_id=self._id_counter, bucket=bucket, key=key,
+                transfer_id=future.meta.transfer_id, bucket=bucket, key=key,
                 filename=filename, extra_args=extra_args,
                 expected_size=expected_size,
             )
         )
-        self._id_counter += 1
-        # TODO: Return a TransferFuture
+        return future
 
     def start(self):
         self._start_transfer_monitor_manager()
@@ -181,6 +189,15 @@ class ProcessPoolDownloader(object):
                     "Invalid extra_args key '%s', "
                     "must be one of: %s" % (
                         kwarg, ', '.join(ALLOWED_DOWNLOAD_ARGS)))
+
+    def _get_transfer_future(self, call_args):
+        transfer_id = self._id_counter
+        meta = ProcessPoolTransferMeta(
+            call_args=call_args, transfer_id=transfer_id)
+        future = ProcessPoolTransferFuture(
+            monitor=self._transfer_monitor, meta=meta)
+        self._id_counter += 1
+        return future
 
     def _start_transfer_monitor_manager(self):
         self._manager = TransferMonitorManager()
@@ -223,6 +240,60 @@ class ProcessPoolDownloader(object):
             worker.join()
 
 
+class ProcessPoolTransferFuture(BaseTransferFuture):
+    def __init__(self, monitor, meta):
+        """The future associated to a submitted process pool transfer request
+
+        :type monitor: TransferMonitor
+        :param monitor: The monitor associated to the proccess pool downloader
+
+        :type meta: ProcessPoolTransferMetaTransferMeta
+        :param meta: The metadata associated to the request. This object
+            is visible to the requester.
+        """
+        self._monitor = monitor
+        self._meta = meta
+
+    @property
+    def meta(self):
+        return self._meta
+
+    def done(self):
+        return self._monitor.is_done(self._meta.transfer_id)
+
+    def result(self):
+        try:
+            return self._monitor.poll_for_result(self._meta.transfer_id)
+        except KeyboardInterrupt:
+            self.cancel()
+            raise
+
+    def cancel(self):
+        self._monitor.notify_exception(
+            self._meta.transfer_id, CancelledError()
+        )
+
+
+class ProcessPoolTransferMeta(BaseTransferMeta):
+    """Holds metadata about the TransferFuture"""
+    def __init__(self, transfer_id, call_args):
+        self._transfer_id = transfer_id
+        self._call_args = call_args
+        self._user_context = {}
+
+    @property
+    def call_args(self):
+        return self._call_args
+
+    @property
+    def transfer_id(self):
+        return self._transfer_id
+
+    @property
+    def user_context(self):
+        return self._user_context
+
+
 class ClientFactory(object):
     def __init__(self, client_kwargs=None):
         """Creates S3 clients for processes
@@ -248,9 +319,20 @@ class TransferMonitor(object):
         Notifications can be sent to the monitor and information can be
         retrieved from the monitor for a particular transfer. Even though
         """
-        self._transfer_exceptions = {}
-        self._transfer_job_count = {}
-        self._job_count_lock = threading.Lock()
+        self._transfer_states = collections.defaultdict(TransferState)
+
+    def is_done(self, transfer_id):
+        return self._transfer_states[transfer_id].done
+
+    def notify_done(self, transfer_id):
+        self._transfer_states[transfer_id].set_done()
+
+    def poll_for_result(self, transfer_id):
+        self._transfer_states[transfer_id].wait_till_done()
+        exception = self._transfer_states[transfer_id].exception
+        if exception:
+            raise exception
+        return None
 
     def notify_exception(self, transfer_id, exception):
         """Notify an exception was encountered for a transfer
@@ -262,7 +344,7 @@ class TransferMonitor(object):
         # this in a  multiprocessing.BaseManager we will want to
         # make sure to update this signature to ensure pickleability of the
         # arguments or have the ProxyObject do the serialization.
-        self._transfer_exceptions[transfer_id] = exception
+        self._transfer_states[transfer_id].exception = exception
 
     def get_exception(self, transfer_id):
         """Retrieve the exception encountered for the transfer
@@ -271,7 +353,7 @@ class TransferMonitor(object):
         :return: The exception encountered for that transfer. Otherwise
             if there were no exceptions, returns None.
         """
-        return self._transfer_exceptions.get(transfer_id)
+        return self._transfer_states[transfer_id].exception
 
     def notify_expected_jobs_to_complete(self, transfer_id, num_jobs):
         """Notify the amount of jobs expected for a transfer
@@ -279,7 +361,7 @@ class TransferMonitor(object):
         :param transfer_id: Unique identifier for the transfer
         :param num_jobs: The number of jobs to complete the transfer
         """
-        self._transfer_job_count[transfer_id] = num_jobs
+        self._transfer_states[transfer_id].jobs_to_complete = num_jobs
 
     def notify_job_complete(self, transfer_id):
         """Notify that a single job is completed for a transfer
@@ -287,9 +369,46 @@ class TransferMonitor(object):
         :param transfer_id: Unique identifier for the transfer
         :return: The number of jobs remaining to complete the transfer
         """
-        with self._job_count_lock:
-            self._transfer_job_count[transfer_id] -= 1
-            return self._transfer_job_count[transfer_id]
+        return self._transfer_states[transfer_id].decrement_jobs_to_complete()
+
+
+class TransferState(object):
+    def __init__(self):
+        self._exception = None
+        self._done_event = threading.Event()
+        self._job_lock = threading.Lock()
+        self._jobs_to_complete = 0
+
+    @property
+    def done(self):
+        return self._done_event.is_set()
+
+    def set_done(self):
+        self._done_event.set()
+
+    def wait_till_done(self):
+        self._done_event.wait(MAXINT)
+
+    @property
+    def exception(self):
+        return self._exception
+
+    @exception.setter
+    def exception(self, val):
+        self._exception = val
+
+    @property
+    def jobs_to_complete(self):
+        return self._jobs_to_complete
+
+    @jobs_to_complete.setter
+    def jobs_to_complete(self, val):
+        self._jobs_to_complete = val
+
+    def decrement_jobs_to_complete(self):
+        with self._job_lock:
+            self._jobs_to_complete -= 1
+            return self._jobs_to_complete
 
 
 class TransferMonitorManager(multiprocessing.managers.BaseManager):
@@ -338,6 +457,8 @@ class Submitter(multiprocessing.Process):
             except Exception as e:
                 self._transfer_monitor.notify_exception(
                     download_file_job.transfer_id, e)
+                self._transfer_monitor.notify_done(
+                    download_file_job.transfer_id)
 
     def _submit_get_object_jobs(self, download_file_job):
         size = self._get_size(download_file_job)
@@ -481,6 +602,7 @@ class GetObjectWorker(multiprocessing.Process):
             self._osutil.remove_file(filename)
         else:
             self._do_file_rename(transfer_id, filename, final_filename)
+        self._transfer_monitor.notify_done(transfer_id)
 
     def _do_file_rename(self, transfer_id, filename, final_filename):
         try:
